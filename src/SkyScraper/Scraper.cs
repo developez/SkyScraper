@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SkyScraper
@@ -14,6 +15,9 @@ namespace SkyScraper
         readonly IScrapedUris scrapedUris;
         Uri baseUri;
         DateTime? endDateTime;
+        private Semaphore maxGetConnSem;
+        private int getConnSemCounter;
+
         public event Action<Uri> OnScrape = delegate { };
         public event Action<Exception> OnHttpClientException = delegate { };
 
@@ -36,6 +40,17 @@ namespace SkyScraper
             this.httpClient = httpClient;
             this.scrapedUris = scrapedUris;
             Observers = new List<IObserver<HtmlDoc>>();
+            this.maxGetConnSem = null;
+            this.getConnSemCounter = 0;
+        }
+
+        public Scraper(IHttpClient httpClient, IScrapedUris scrapedUris, int maxGetConnections)
+        {
+            this.httpClient = httpClient;
+            this.scrapedUris = scrapedUris;
+            Observers = new List<IObserver<HtmlDoc>>();
+            this.maxGetConnSem = new Semaphore(maxGetConnections, maxGetConnections);
+            this.getConnSemCounter = 0;
         }
 
         public IDisposable Subscribe(IObserver<HtmlDoc> observer)
@@ -69,11 +84,16 @@ namespace SkyScraper
             var htmlDoc = new HtmlDoc { Uri = uri };
             try
             {
+                maxGetConnSem.WaitOne();
                 htmlDoc.Html = await httpClient.GetString(uri);
             }
             catch (Exception exception)
             {
                 OnHttpClientException(exception);
+            }
+            finally
+            {
+                getConnSemCounter = maxGetConnSem.Release();
             }
             if (string.IsNullOrEmpty(htmlDoc.Html))
                 return;
@@ -93,8 +113,10 @@ namespace SkyScraper
                 localLinks = localLinks.Where(x => !IgnoreLinks.IsMatch(x.ToString()));
             if (MaxDepth.HasValue)
                 localLinks = localLinks.Where(x => x.Segments.Length <= MaxDepth + 1);
+            
             var tasks = localLinks.Select(DoScrape).ToArray();
-            Task.WaitAll(tasks);
+
+            Task.WaitAll(tasks.ToArray());            
         }
 
         Uri NormalizeLink(string link, Uri pageBaseUri)
